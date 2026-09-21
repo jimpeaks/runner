@@ -509,14 +509,16 @@ function parseDuration(str){
    Only reformats while the caret is at the end: mid-string edits are left
    alone, which is the usual failure mode of input masks. A colon the user
    types themselves is absorbed rather than duplicated. */
-function attachTimeMask(input, sizes, onChange){
-  var total = sizes.reduce(function(a,b){ return a+b; }, 0);
+function attachTimeMask(input, base, onChange, allowHours){
+  var cap = base.reduce(function(a,b){ return a+b; }, 0);
+  var maxDigits = allowHours ? 6 : cap;
   var last = input.value;
   input.addEventListener("input", function(){
     var v = input.value;
     var deleting = v.length < last.length;
     if(input.selectionStart !== v.length){ last = v; onChange(v); return; }
-    var digits = v.replace(/\D/g, "").slice(0, total);
+    var digits = v.replace(/\D/g, "").slice(0, maxDigits);
+    var sizes = allowHours ? sizesFor(base, digits.length) : base;
     var out = "", i = 0;
     for(var g = 0; g < sizes.length && i < digits.length; g++){
       var chunk = digits.slice(i, i + sizes[g]);
@@ -530,9 +532,23 @@ function attachTimeMask(input, sizes, onChange){
     onChange(out);
   });
 }
-/* A sub-hour goal is entered mm:ss; anything longer needs an hours group. */
+/* Distance sets the starting shape, but whether a time needs an hours field
+   depends on pace, not distance: a 10K over an hour is the common case for
+   the runners this is built for. A fifth digit escalates to h:mm:ss, a sixth
+   to hh:mm:ss, so nothing typed is ever silently dropped. */
+function sizesFor(base, n){
+  var cap = base.reduce(function(a,b){ return a+b; }, 0);
+  if(n <= cap) return base;
+  if(n === 5) return [1,2,2];
+  return [2,2,2];
+}
 function timeMaskFor(goalKm){ return goalKm >= 15 ? [1,2,2] : [2,2]; }
-function timeHintFor(goalKm){ return goalKm >= 15 ? "1:45:00" : "27:30"; }
+function timeHintFor(goalKm){
+  if(goalKm >= 40) return "3:45:00";
+  if(goalKm >= 15) return "1:45:00";
+  if(goalKm >= 8)  return "55:00";
+  return "27:30";
+}
 
 /* ===================== 2. reference data ===================== */
 
@@ -1448,7 +1464,8 @@ function renderSetup(){
       '<div class="field" style="margin-bottom:0"><label for="targetTime">Target time <span class="muted" style="font-weight:400">' + EN + ' optional</span></label>' +
         '<input type="text" id="targetTime" inputmode="numeric" placeholder="' + timeHintFor(goalKmOf(d)) + '" value="' + esc(d.targetTime) + '" aria-describedby="targetHint">' +
         '<p class="hint" id="targetHint">The time you want to run, as ' +
-          (goalKmOf(d) >= 15 ? "h:mm:ss" : "mm:ss") + '. Leave it blank to just get round. ' +
+          (goalKmOf(d) >= 15 ? "h:mm:ss" : "mm:ss &mdash; keep typing for h:mm:ss if you will be out longer than an hour") +
+          '. Leave it blank to just get round. ' +
           'Race-pace sessions are run at this pace instead of an estimate.</p>' +
       '</div>' +
     '</div>' +
@@ -1581,7 +1598,7 @@ function wireSetup(){
   var fk = el("fiveK");
   if(fk) attachTimeMask(fk, [2,2], function(v){ d.fiveK = v; });
   var tt = el("targetTime");
-  if(tt) attachTimeMask(tt, timeMaskFor(goalKmOf(d)), function(v){ d.targetTime = v; });
+  if(tt) attachTimeMask(tt, timeMaskFor(goalKmOf(d)), function(v){ d.targetTime = v; }, true);
 
   Array.prototype.forEach.call(document.querySelectorAll("[data-ail]"), function(b){
     b.addEventListener("click", function(){
