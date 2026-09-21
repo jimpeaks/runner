@@ -493,6 +493,46 @@ function parseTime(str){
   var n = Number(str);
   return (isFinite(n) && n>0) ? n*60 : NaN;
 }
+/* h:mm:ss, mm:ss or bare minutes. Empty returns null, meaning "no target set". */
+function parseDuration(str){
+  var s = String(str||"").trim();
+  if(!s) return null;
+  var parts = s.split(/[:.\s]+/).filter(function(x){ return x !== ""; });
+  for(var i=0; i<parts.length; i++){ if(!/^\d+$/.test(parts[i])) return NaN; }
+  if(parts.length === 3) return (+parts[0])*3600 + (+parts[1])*60 + (+parts[2]);
+  if(parts.length === 2) return (+parts[0])*60 + (+parts[1]);
+  if(parts.length === 1) return (+parts[0])*60;
+  return NaN;
+}
+
+/* The numeric keypad on a phone has no colon, so the field supplies it.
+   Only reformats while the caret is at the end: mid-string edits are left
+   alone, which is the usual failure mode of input masks. A colon the user
+   types themselves is absorbed rather than duplicated. */
+function attachTimeMask(input, sizes, onChange){
+  var total = sizes.reduce(function(a,b){ return a+b; }, 0);
+  var last = input.value;
+  input.addEventListener("input", function(){
+    var v = input.value;
+    var deleting = v.length < last.length;
+    if(input.selectionStart !== v.length){ last = v; onChange(v); return; }
+    var digits = v.replace(/\D/g, "").slice(0, total);
+    var out = "", i = 0;
+    for(var g = 0; g < sizes.length && i < digits.length; g++){
+      var chunk = digits.slice(i, i + sizes[g]);
+      out += (g ? ":" : "") + chunk;
+      i += sizes[g];
+      if(chunk.length === sizes[g] && i === digits.length &&
+         g < sizes.length - 1 && !deleting) out += ":";
+    }
+    input.value = out;
+    last = out;
+    onChange(out);
+  });
+}
+/* A sub-hour goal is entered mm:ss; anything longer needs an hours group. */
+function timeMaskFor(goalKm){ return goalKm >= 15 ? [1,2,2] : [2,2]; }
+function timeHintFor(goalKm){ return goalKm >= 15 ? "1:45:00" : "27:30"; }
 
 /* ===================== 2. reference data ===================== */
 
@@ -677,6 +717,7 @@ function aggregateRules(ids){
 }
 
 var DEFAULT_DAYS = {
+  2:[2,6],
   3:[1,3,6],
   4:[0,2,4,6],
   5:[0,1,3,4,6],
@@ -834,12 +875,12 @@ function sSteady(km){
     blocks:[blockRun(wu,"easy","Warm up"), blockRun(mid,"steady","Steady, comfortably hard"), blockRun(cd,"easy","Cool down")],
     purpose:"A sustained moderate effort. Cheaper than threshold work but still pushes the aerobic ceiling." };
 }
-function sLong(km, phase, goalKm, rules, weekIdx){
+function sLong(km, phase, goalKm, rules, weekIdx, rpKey){
   var blocks, name = "Long run", purpose =
     "The single most important session of the week. Time on your feet is what makes race distance feel survivable.";
   if(phase === "Sharpen" && goalKm >= 15 && km >= 12){
     var rp = Math.min(km*0.35, goalKm >= 30 ? 10 : 6);
-    blocks = [blockRun(km-rp, "long", "Easy, settled"), blockRun(rp, goalKm>=30?"marathon":"threshold", "Finish at goal race pace")];
+    blocks = [blockRun(km-rp, "long", "Easy, settled"), blockRun(rp, rpKey || (goalKm>=30?"marathon":"threshold"), "Finish at goal race pace")];
     name = "Long run with race-pace finish";
     purpose = "Practice running goal pace on tired legs " + EN + " the specific skill race day asks for.";
   } else if(phase === "Build" && km >= 10 && weekIdx % 3 === 2){
@@ -927,10 +968,10 @@ function sFartlek(km, weekIdx){
             blockRun(cd,"easy","Cool down")],
     purpose:"Unstructured speed. Gets you used to changing pace without the precision (or pressure) of a track session." };
 }
-function sRacePace(km, goalKm){
+function sRacePace(km, goalKm, rpKey){
   var wu = Math.min(2, km*0.26), cd = Math.min(1.5, km*0.20);
   var work = Math.max(3, km - wu - cd);
-  var paceKey = goalKm >= 30 ? "marathon" : goalKm >= 15 ? "threshold" : "tenk";
+  var paceKey = rpKey || (goalKm >= 30 ? "marathon" : goalKm >= 15 ? "threshold" : "tenk");
   return { type:"racepace", name:"Race-pace run", km:wu+work+cd,
     blocks:[blockRun(wu,"easy","Warm up"),
             blockRun(work, paceKey, "At your goal race pace, locked in"),
@@ -987,8 +1028,13 @@ function generatePlan(setup){
   weeks = clamp(weeks, 3, 40);
 
   var pm = paceModel(setup.fiveKSec);
-  var goalPace = racePredict(pm.vdot, goalKm*1000) / goalKm;
-  pm.goal = goalPace;
+  var projected = racePredict(pm.vdot, goalKm*1000);
+  /* A stated target is the pace the runner is training for. Without one,
+     fall back to what their current fitness projects. */
+  var goalTime = setup.targetSec || projected;
+  pm.goal = goalTime / goalKm;
+  /* With a real target, race-pace work is run at that pace rather than a zone proxy */
+  var rpKey = setup.targetSec ? "goal" : null;
 
   var startKm = setup.weeklyKm > 0 ? setup.weeklyKm : Math.max(12, goalKm * 1.6);
   var lrPeak = longRunPeak(goalKm) * rules.longCap;
@@ -1001,7 +1047,7 @@ function generatePlan(setup){
   var runDays = chooseDays(setup.days, setup.preferredDays, rules);
   var longDay = pickLongDay(runDays);
 
-  var longShare = setup.days <= 3 ? 0.38 : setup.days <= 4 ? 0.34 : goalKm > 22 ? 0.33 : 0.30;
+  var longShare = setup.days <= 2 ? 0.55 : setup.days <= 3 ? 0.38 : setup.days <= 4 ? 0.34 : goalKm > 22 ? 0.33 : 0.30;
   var longStart = clamp(Math.max(setup.longestKm || 0, startKm*longShare, 4), 4, lrPeak);
 
   var planWeeks = [];
@@ -1023,13 +1069,18 @@ function generatePlan(setup){
       var lm = taperWeeks === 3 ? [0.72,0.55,0.35] : taperWeeks === 2 ? [0.62,0.40] : [0.50];
       longKm = lrPeak * lm[clamp(tIdx,0,lm.length-1)];
     }
-    longKm = Math.min(longKm, vol*0.45, lrPeak);
+    /* the 45% ceiling assumes several supporting runs; with only two it would
+       strand volume the week has nowhere else to put */
+    longKm = Math.min(longKm, vol * (setup.days <= 2 ? 0.65 : 0.45), lrPeak);
 
     /* how many quality sessions */
     var qCount = 2;
     if(setup.days <= 3) qCount = 1;
+    /* two runs a week leaves no room for quality alongside the long run */
+    if(setup.days <= 2) qCount = 0;
     if(phase === "Base") qCount = Math.min(qCount, setup.days <= 4 ? 1 : 2);
-    if(phase === "Taper") qCount = 1;
+    /* a cap, not an assignment: it must not resurrect quality in a 2-day week */
+    if(phase === "Taper") qCount = Math.min(qCount, 1);
     qCount = Math.min(qCount, rules.maxQuality, Math.max(0, runDays.length - 1));
     var pctThrough = w / Math.max(1, weeks-1);
     if(rules.noSpeedUntil > 0 && pctThrough < rules.noSpeedUntil) qCount = Math.min(qCount, 1);
@@ -1101,7 +1152,7 @@ function generatePlan(setup){
         if((setup.mode === "race" && isRaceWeek) || (setup.mode !== "race" && isFinalWeek)){
           sess = sShakeout(clamp(vol*0.12, 3, 5), rules);
         } else {
-          sess = sLong(round(longKm,0.5), phase, goalKm, rules, w);
+          sess = sLong(round(longKm,0.5), phase, goalKm, rules, w, rpKey);
         }
       } else {
         var slot = null;
@@ -1128,7 +1179,7 @@ function generatePlan(setup){
             if(qt === "tempo")          sess = sTempo(km, goalKm, phase);
             else if(qt === "hills")     sess = sHills(km, w);
             else if(qt === "fartlek")   sess = sFartlek(km, w);
-            else if(qt === "racepace")  sess = sRacePace(km, goalKm);
+            else if(qt === "racepace")  sess = sRacePace(km, goalKm, rpKey);
             else if(qt === "easy")      sess = sEasy(km, true, rules);
             else                        sess = sSteady(km);
           }
@@ -1316,11 +1367,13 @@ function newDraft(){
   return {
     goalId:"hm", goalLabel:"Half marathon", goalKm:21.0975, customKm:10,
     mode:"weeks", raceDate:"", amount:12, unit:"weeks",
+    targetTime:"",
     days:4, preferredDays:[],
-    fiveK:"27:30", weekly:20, longest:8,
+    fiveK:"", weekly:20, longest:8,
     ailments:[]
   };
 }
+function goalKmOf(d){ return d.goalId === "custom" ? (d.customKm || 10) : d.goalKm; }
 /* Round-trip a built plan back into an editable draft, so testing a variation
    means changing one field rather than retyping the whole form. */
 function draftFromSetup(s){
@@ -1333,6 +1386,7 @@ function draftFromSetup(s){
     raceDate: s.raceDate || "",
     amount: s.amount || 12,
     unit: s.unit || "weeks",
+    targetTime: s.targetSec ? hms(s.targetSec) : "",
     days: s.days,
     preferredDays: (s.preferredDays || []).slice(),
     fiveK: mmss(s.fiveKSec),
@@ -1391,13 +1445,19 @@ function renderSetup(){
             '</div>' +
             '<p class="hint">Ends with a goal run at your target distance. You can reset and start a fresh block whenever you like.</p>') +
       '</div>' +
+      '<div class="field" style="margin-bottom:0"><label for="targetTime">Target time <span class="muted" style="font-weight:400">' + EN + ' optional</span></label>' +
+        '<input type="text" id="targetTime" inputmode="numeric" placeholder="' + timeHintFor(goalKmOf(d)) + '" value="' + esc(d.targetTime) + '" aria-describedby="targetHint">' +
+        '<p class="hint" id="targetHint">The time you want to run, as ' +
+          (goalKmOf(d) >= 15 ? "h:mm:ss" : "mm:ss") + '. Leave it blank to just get round. ' +
+          'Race-pace sessions are run at this pace instead of an estimate.</p>' +
+      '</div>' +
     '</div>' +
 
     '<div class="step">' +
       '<div class="step-head"><span class="step-num">02</span><h2>Your week</h2></div>' +
       '<div class="field"><span class="legend">Running days per week</span>' +
         '<div class="stepper">' +
-          '<button type="button" id="daysDown" aria-label="Fewer days"'+(d.days<=3?" disabled":"")+'>&minus;</button>' +
+          '<button type="button" id="daysDown" aria-label="Fewer days"'+(d.days<=2?" disabled":"")+'>&minus;</button>' +
           '<span class="val mono" id="daysVal">'+d.days+'</span>' +
           '<button type="button" id="daysUp" aria-label="More days"'+(d.days>=7?" disabled":"")+'>+</button>' +
           '<span class="unit">days<br>a week</span>' +
@@ -1417,8 +1477,8 @@ function renderSetup(){
     '<div class="step">' +
       '<div class="step-head"><span class="step-num">03</span><h2>Where you are now</h2></div>' +
       '<div class="field"><label for="fiveK">Current 5K time</label>' +
-        '<input type="text" id="fiveK" inputmode="numeric" placeholder="27:30" value="'+esc(d.fiveK)+'">' +
-        '<p class="hint">Every training pace in the plan is calculated from this. A recent parkrun or a hard solo 5K is ideal; a best guess is fine.</p>' +
+        '<input type="text" id="fiveK" inputmode="numeric" placeholder="27:30" value="'+esc(d.fiveK)+'" aria-describedby="fiveKHint">' +
+        '<p class="hint" id="fiveKHint">Minutes and seconds, as mm:ss &mdash; the colon is added for you. Every training pace in the plan is calculated from this, so a recent parkrun or a hard solo 5K is ideal.</p>' +
       '</div>' +
       '<div class="row">' +
         '<div class="field" style="margin-bottom:0"><label for="weekly">Typical week right now</label>' +
@@ -1497,11 +1557,11 @@ function wireSetup(){
   var au = el("amountUnit"); if(au) au.addEventListener("change", function(){ d.unit = au.value; });
 
   el("daysDown").addEventListener("click", function(){
-    d.days = clamp(d.days-1, 3, 7);
+    d.days = clamp(d.days-1, 2, 7);
     if(d.preferredDays.length > d.days) d.preferredDays = d.preferredDays.slice(0, d.days);
     renderSetup();
   });
-  el("daysUp").addEventListener("click", function(){ d.days = clamp(d.days+1, 3, 7); renderSetup(); });
+  el("daysUp").addEventListener("click", function(){ d.days = clamp(d.days+1, 2, 7); renderSetup(); });
 
   Array.prototype.forEach.call(document.querySelectorAll("[data-day]"), function(b){
     b.addEventListener("click", function(){
@@ -1514,13 +1574,14 @@ function wireSetup(){
     });
   });
 
-  ["fiveK","weekly","longest"].forEach(function(id){
+  ["weekly","longest"].forEach(function(id){
     var n = el(id); if(!n) return;
-    n.addEventListener("input", function(){
-      if(id === "fiveK") d.fiveK = n.value;
-      else d[id === "weekly" ? "weekly" : "longest"] = toKmInput(Number(n.value)||0);
-    });
+    n.addEventListener("input", function(){ d[id] = toKmInput(Number(n.value)||0); });
   });
+  var fk = el("fiveK");
+  if(fk) attachTimeMask(fk, [2,2], function(v){ d.fiveK = v; });
+  var tt = el("targetTime");
+  if(tt) attachTimeMask(tt, timeMaskFor(goalKmOf(d)), function(v){ d.targetTime = v; });
 
   Array.prototype.forEach.call(document.querySelectorAll("[data-ail]"), function(b){
     b.addEventListener("click", function(){
@@ -1556,8 +1617,11 @@ function buildFromDraft(){
     var wk = d.unit === "months" ? Math.round(d.amount*4.345) : d.amount;
     if(!(wk >= 3 && wk <= 40)) errs.push("Choose a time frame between 3 and 40 weeks.");
   }
-  if(d.longest > goalKm * 1.6 && goalKm >= 5){
-    /* not an error, just noted later */
+  /* A target is optional and deliberately unchecked against current fitness:
+     see the feasibility issue in Linear. Only nonsense is rejected. */
+  var targetSec = parseDuration(d.targetTime);
+  if(targetSec !== null && (!isFinite(targetSec) || targetSec < 240 || targetSec > 86400)){
+    errs.push("Enter a target time between 4 minutes and 24 hours, or leave it blank.");
   }
 
   var box = el("setupErr");
@@ -1574,6 +1638,7 @@ function buildFromDraft(){
     goalKm: goalKm,
     mode: d.mode,
     raceDate: d.raceDate,
+    targetSec: (targetSec !== null && isFinite(targetSec)) ? targetSec : null,
     amount: Number(d.amount)||12,
     unit: d.unit,
     days: d.days,
@@ -1628,7 +1693,7 @@ function renderToday(){
           '<div class="sub">' +
             (plan.raceISO ? fmtDateLong(parseISO(plan.raceISO))
                           : "Finishing " + fmtDate(plan.weeks[plan.weeks.length-1].end)) +
-            ' ' + MID + ' target ' + hms(plan.predicted) +
+            ' ' + MID + ' ' + (plan.setup.targetSec ? 'target ' + hms(plan.setup.targetSec) : 'projected ' + hms(plan.predicted)) +
           '</div>' +
         '</div>' +
         '<div class="countdown' + (cd.race ? " race" : "") + '"><b>' + cd.val + '</b><span>' + cd.label + '</span></div>' +
@@ -1745,7 +1810,7 @@ function renderSchedule(){
           '<h2>' + esc(plan.setup.goalLabel) + '</h2>' +
           '<div class="sub">' +
             (plan.raceISO ? fmtDateLong(parseISO(plan.raceISO)) : plan.weeks.length + " week block, finishing " + fmtDate(plan.weeks[plan.weeks.length-1].end)) +
-            ' ' + MID + ' target ' + hms(plan.predicted) +
+            ' ' + MID + ' ' + (plan.setup.targetSec ? 'target ' + hms(plan.setup.targetSec) : 'projected ' + hms(plan.predicted)) +
           '</div>' +
         '</div>' +
         '<div class="countdown' + (cdRace ? " race" : "") + '"><b>' + cdVal + '</b><span>' + cdLabel + '</span></div>' +
@@ -1973,7 +2038,13 @@ function renderPaces(){
           return '<div' + (isGoal ? ' class="goal"' : '') + '><dt>' + esc(p.label) + '</dt><dd>' + hms(racePredict(paces.vdot, p.km*1000)) + '</dd></div>';
         }).join("") +
       '</dl>' +
-      '<p class="hint">Goal pace for your ' + esc(s.goalLabel) + ': <b class="mono">' + paceStr(paces.goal) + ' per ' + uLabel() + '</b>.</p>' +
+      (s.targetSec
+        ? '<div class="note tip" style="margin-top:11px"><span class="ni">Target</span><span>You are aiming for <b class="mono">' +
+            hms(s.targetSec) + '</b> &mdash; <b class="mono">' + paceStr(paces.goal) + ' per ' + uLabel() + '</b>. ' +
+            'Your current fitness projects <b class="mono">' + hms(plan.predicted) + '</b>. ' +
+            'Race-pace sessions are run at your target.</span></div>'
+        : '<p class="hint">Goal pace for your ' + esc(s.goalLabel) + ': <b class="mono">' + paceStr(paces.goal) +
+            ' per ' + uLabel() + '</b>. Set a target time in the plan setup to train at a pace you choose instead.</p>') +
     '</div>' +
 
     '<div>' +
@@ -2015,6 +2086,8 @@ function renderSettings(){
             s.mode === "race" ? fmtDateLong(parseISO(s.raceDate)) : plan.weeks.length + " weeks") +
         row("Running days", s.days + " a week", plan.runDays.map(function(i){ return DOW[i]; }).join(", ")) +
         row("Long run", DOW_FULL[plan.longDay], plan.longDay >= 5 ? "Weekend, as preferred" : "Best recovery spacing available") +
+        row("Target time", s.targetSec ? hms(s.targetSec) : "None set",
+            s.targetSec ? paceStr(plan.paces.goal) + " per " + uLabel() : "Projected " + hms(plan.predicted)) +
         row("Current 5K", hms(s.fiveKSec)) +
         row("Starting week", distU(plan.weeks[0].km)) +
         row("Peak week", distU(plan.peakKm), "Week " + (peakWeekIndex()+1)) +
