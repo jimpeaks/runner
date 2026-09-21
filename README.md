@@ -13,13 +13,17 @@ lays out every session between now and race day.
 - **Your week** — pick 3–7 running days. Name specific weekdays or let Runner choose
   them, spaced for recovery. Weekend days are preferred for the long run.
 - **Real prescriptions** — every session carries its blocks, target pace ranges
-  derived from your 5K time, and why it is in the plan.
+  derived from your 5K time via a VDOT model, and why it is in the plan.
 - **Periodisation** — base → build → sharpen → taper, with recovery weeks and a
   volume ramp capped by your current weekly distance and longest recent run.
 - **Ailment-aware** — flagged niggles change the structure of the plan, not just the
   warnings: capped weekly increases, hill work swapped out, speed work delayed, the
   day after the long run kept clear.
+- **Today** — opens on today's session with its full prescription, alongside
+  progress for the current week and the whole block.
 - **Progress** — mark sessions complete; progress persists in `localStorage`.
+- **Adjust and rebuild** — change any input and regenerate; your current plan
+  stays untouched until you confirm.
 - **Calendar export** — a standard `.ics` file with one event per session and a
   reminder on each.
 - **Units** — km or miles, switchable at any time.
@@ -42,7 +46,7 @@ Everything lives in `index.html`:
 | Section | What it holds |
 | --- | --- |
 | `2. reference data` | Ailment rules, goal presets, session-type metadata |
-| `3. pace model` | Training paces and Riegel race predictions from a 5K time |
+| `3. pace model` | VDOT model (Daniels-Gilbert): training-pace bands and race predictions |
 | `4. plan generation` | Volume ramp, day assignment, session builders |
 | `5. state` | `localStorage` persistence |
 | `7. rendering` | Setup, schedule, paces and settings views |
