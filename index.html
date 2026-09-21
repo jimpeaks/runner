@@ -595,22 +595,65 @@ var CROSS_ROTATION = [
 
 /* ===================== 3. pace model ===================== */
 
-function paceModel(fiveKSec){
-  var p = fiveKSec/5; /* sec per km at 5K pace */
-  return {
-    recovery:  p*1.48,
-    easy:      p*1.35,
-    long:      p*1.31,
-    steady:    p*1.19,
-    marathon:  p*1.13,
-    threshold: p*1.06,
-    tenk:      p*1.02,
-    interval:  p*1.00,
-    rep:       p*0.95,
-    stride:    p*0.88
-  };
+/* Training paces come from a VDOT model (Daniels-Gilbert), not a fixed multiple of
+   5K pace. The gap between race pace and easy pace widens with fitness, so a single
+   ratio over-slows slower runners badly: at a 35:00 5K it prescribes a brisk walk. */
+
+/* Oxygen cost of running at velocity v, in m/min */
+function vo2At(v){ return -4.60 + 0.182258*v + 0.000104*v*v; }
+/* Fraction of VO2max a runner can hold for t minutes */
+function pctMax(t){
+  return 0.8 + 0.1894393*Math.exp(-0.012778*t) + 0.2989558*Math.exp(-0.1932605*t);
 }
-function riegel(fiveKSec, km){ return fiveKSec * Math.pow(km/5, 1.06); }
+/* VDOT implied by covering `metres` in `seconds` */
+function vdotFrom(metres, seconds){
+  var t = seconds/60, v = metres/t;
+  return vo2At(v) / pctMax(t);
+}
+/* Inverse of vo2At: the velocity that costs this much oxygen */
+function velocityAt(vo2){
+  var a = 0.000104, b = 0.182258, c = -4.60 - vo2;
+  return (-b + Math.sqrt(b*b - 4*a*c)) / (2*a);
+}
+/* Seconds per km at a given fraction of VDOT */
+function paceAtPct(vdot, pct){ return 60000 / velocityAt(vdot * pct); }
+/* Race time in seconds over `metres`, solved against the same curve */
+function racePredict(vdot, metres){
+  var lo = 0.5, hi = 1200, mid, i;
+  for(i = 0; i < 80; i++){
+    mid = (lo + hi) / 2;
+    if(vo2At(metres/mid) > vdot * pctMax(mid)) lo = mid; else hi = mid;
+  }
+  return ((lo + hi) / 2) * 60;
+}
+
+/* Each zone as a band of %VDOT. Easy sits in the upper half of Daniels' E range:
+   the slower end of that range is recovery running, and prescribing it as the
+   default turns every easy run into a shuffle. */
+var ZONE_PCT = {
+  recovery:  [0.60, 0.67],
+  easy:      [0.68, 0.74],
+  long:      [0.66, 0.73],
+  steady:    [0.75, 0.80],
+  marathon:  [0.79, 0.85],
+  threshold: [0.84, 0.88],
+  tenk:      [0.90, 0.94],
+  interval:  [0.96, 1.00],
+  rep:       [1.04, 1.09],
+  stride:    [1.10, 1.16]
+};
+
+function paceModel(fiveKSec){
+  var vdot = vdotFrom(5000, fiveKSec);
+  var m = { vdot: vdot, bands: {} };
+  Object.keys(ZONE_PCT).forEach(function(k){
+    var fast = paceAtPct(vdot, ZONE_PCT[k][1]);
+    var slow = paceAtPct(vdot, ZONE_PCT[k][0]);
+    m.bands[k] = [fast, slow];
+    m[k] = (fast + slow) / 2;
+  });
+  return m;
+}
 
 /* ===================== 4. plan generation ===================== */
 
@@ -944,7 +987,7 @@ function generatePlan(setup){
   weeks = clamp(weeks, 3, 40);
 
   var pm = paceModel(setup.fiveKSec);
-  var goalPace = riegel(setup.fiveKSec, goalKm) / goalKm;
+  var goalPace = racePredict(pm.vdot, goalKm*1000) / goalKm;
   pm.goal = goalPace;
 
   var startKm = setup.weeklyKm > 0 ? setup.weeklyKm : Math.max(12, goalKm * 1.6);
@@ -1128,7 +1171,7 @@ function generatePlan(setup){
     weeks: planWeeks, totalRuns: totalRuns, paces: pm, rules: rules,
     runDays: runDays, longDay: longDay, taperWeeks: taperWeeks,
     peakKm: round(peakActual,0.5), raceISO: raceISO,
-    predicted: riegel(setup.fiveKSec, goalKm),
+    predicted: racePredict(pm.vdot, goalKm*1000),
     setup: setup
   };
 }
@@ -1216,14 +1259,10 @@ function paceStr(secPerKm){
   var v = state.units === "mi" ? secPerKm*KM_MI : secPerKm;
   return mmss(v);
 }
-function paceRange(secPerKm, tol){
-  var lo = secPerKm*(1-tol), hi = secPerKm*(1+tol);
-  return paceStr(lo) + EN + paceStr(hi);
-}
 function paceFor(key, paces){
-  if(!paces[key]) return null;
-  var tol = (key==="easy"||key==="recovery"||key==="long") ? 0.035 : 0.018;
-  return paceRange(paces[key], tol);
+  var b = paces.bands && paces.bands[key];
+  if(!b) return paces[key] ? paceStr(paces[key]) : null;
+  return paceStr(b[0]) + EN + paceStr(b[1]);
 }
 function toKmInput(v){ return state.units === "mi" ? v*KM_MI : v; }
 function fromKmInput(km){ return state.units === "mi" ? km/KM_MI : km; }
@@ -1911,15 +1950,15 @@ function renderPaces(){
   '<div class="sec stack">' +
     '<div>' +
       '<h2>Training paces</h2>' +
-      '<p class="lede">Every pace below comes from your 5K time of <b class="mono">' + hms(s.fiveKSec) + '</b>. ' +
+      '<p class="lede">Every pace below comes from your 5K time of <b class="mono">' + hms(s.fiveKSec) + '</b>, ' +
+        'which puts your VDOT at <b class="mono">' + paces.vdot.toFixed(1) + '</b>. ' +
         'They are per ' + (state.units === "mi" ? "mile" : "kilometre") + '. Ranges, not targets &mdash; effort on the day wins over the watch.</p>' +
       '<ul class="zones">' +
         PACE_ZONES.map(function(z){
-          var tol = (z.key==="easy"||z.key==="recovery"||z.key==="long") ? 0.035 : 0.018;
           return '<li style="--tc:' + z.color + '">' +
             '<span class="zb"></span>' +
             '<span class="zn"><b>' + esc(z.name) + '</b><span>' + esc(z.desc) + '</span></span>' +
-            '<span class="zp">' + paceRange(paces[z.key], tol) + '<small>per ' + uLabel() + '</small></span>' +
+            '<span class="zp">' + paceFor(z.key, paces) + '<small>per ' + uLabel() + '</small></span>' +
           '</li>';
         }).join("") +
       '</ul>' +
@@ -1927,11 +1966,11 @@ function renderPaces(){
 
     '<div>' +
       '<h2>What that predicts</h2>' +
-      '<p class="lede">Riegel projection from your current 5K. Useful as a sanity check on goal pace, not a promise.</p>' +
+      '<p class="lede">Projected from your VDOT, allowing for the fact that you can hold a smaller share of your maximum the longer you race. A sanity check on goal pace, not a promise.</p>' +
       '<dl class="predict">' +
         preds.map(function(p){
           var isGoal = Math.abs(p.km - s.goalKm) < 0.01;
-          return '<div' + (isGoal ? ' class="goal"' : '') + '><dt>' + esc(p.label) + '</dt><dd>' + hms(riegel(s.fiveKSec, p.km)) + '</dd></div>';
+          return '<div' + (isGoal ? ' class="goal"' : '') + '><dt>' + esc(p.label) + '</dt><dd>' + hms(racePredict(paces.vdot, p.km*1000)) + '</dd></div>';
         }).join("") +
       '</dl>' +
       '<p class="hint">Goal pace for your ' + esc(s.goalLabel) + ': <b class="mono">' + paceStr(paces.goal) + ' per ' + uLabel() + '</b>.</p>' +
