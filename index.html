@@ -1030,7 +1030,10 @@ function sRest(weekIdx, dayIdx, rules, ailIds){
 function generatePlan(setup){
   var rules = aggregateRules(setup.ailments);
   var goalKm = setup.goalKm;
-  var start = mondayOf(today());
+  /* The plan is anchored to the week it was built, stored in the setup.
+     Recomputing it from today() slid the whole plan forward every Monday,
+     orphaning every completion tick from the weeks before. */
+  var start = setup.startISO ? mondayOf(parseISO(setup.startISO)) : mondayOf(today());
   var weeks, raceDate = null, raceISO = null;
 
   if(setup.mode === "race"){
@@ -1308,6 +1311,18 @@ function load(){
 }
 function wipe(){
   try{ localStorage.removeItem(STORE_KEY); }catch(e){}
+}
+/* Plans saved before the start date was stored have to have it reconstructed.
+   The week of the earliest completed session is when the runner actually
+   began, and every existing tick is guaranteed to land inside the plan.
+   The recorded build date is the fallback, because a plan built on a Sunday
+   points at a week that was already over. */
+function inferStartISO(){
+  var ticks = Object.keys(state.completions || {})
+    .filter(function(k){ return /^\d{4}-\d{2}-\d{2}$/.test(k); }).sort();
+  if(ticks.length) return toISO(mondayOf(parseISO(ticks[0])));
+  if(state.created) return toISO(mondayOf(parseISO(state.created)));
+  return toISO(mondayOf(today()));
 }
 
 /* ===================== 6. unit + format helpers ===================== */
@@ -1656,6 +1671,7 @@ function buildFromDraft(){
     mode: d.mode,
     raceDate: d.raceDate,
     targetSec: (targetSec !== null && isFinite(targetSec)) ? targetSec : null,
+    startISO: toISO(mondayOf(today())),
     amount: Number(d.amount)||12,
     unit: d.unit,
     days: d.days,
@@ -2195,6 +2211,7 @@ function wireSettings(){
     if(!confirm("Rebuild this same plan starting from this week, and clear all progress?")) return;
     state.completions = {};
     if(state.setup.mode !== "race") state.setup.amount = plan.weeks.length, state.setup.unit = "weeks";
+    state.setup.startISO = toISO(mondayOf(today()));
     plan = generatePlan(state.setup);
     state.created = toISO(today());
     state.week = 0;
@@ -2442,6 +2459,11 @@ Array.prototype.forEach.call(tabbar.querySelectorAll("[data-tab]"), function(b){
 /* ===================== 10. boot ===================== */
 
 if(load() && state.setup){
+  /* one-time repair for plans saved before the start date was stored */
+  if(!state.setup.startISO){
+    state.setup.startISO = inferStartISO();
+    save();
+  }
   plan = generatePlan(state.setup);
   /* Today is the landing view on every open, whatever tab was last used */
   state.tab = "today";
